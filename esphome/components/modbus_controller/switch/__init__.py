@@ -1,17 +1,16 @@
+import esphome.codegen as cg
 from esphome.components import switch
 import esphome.config_validation as cv
-import esphome.codegen as cg
+from esphome.const import CONF_ADDRESS, CONF_ID
 
-
-from esphome.const import CONF_ID, CONF_ADDRESS
 from .. import (
-    add_modbus_base_properties,
-    modbus_controller_ns,
-    modbus_calc_properties,
-    validate_modbus_register,
+    MODBUS_REGISTER_TYPE,
     ModbusItemBaseSchema,
     SensorItem,
-    MODBUS_REGISTER_TYPE,
+    add_modbus_base_properties,
+    modbus_calc_properties,
+    modbus_controller_ns,
+    validate_modbus_register,
 )
 from ..const import (
     CONF_BITMASK,
@@ -32,11 +31,11 @@ ModbusSwitch = modbus_controller_ns.class_(
 )
 
 CONFIG_SCHEMA = cv.All(
-    switch.SWITCH_SCHEMA.extend(cv.COMPONENT_SCHEMA)
+    switch.switch_schema(ModbusSwitch, default_restore_mode="DISABLED")
+    .extend(cv.COMPONENT_SCHEMA)
     .extend(ModbusItemBaseSchema)
     .extend(
         {
-            cv.GenerateID(): cv.declare_id(ModbusSwitch),
             cv.Optional(CONF_REGISTER_TYPE): cv.enum(MODBUS_REGISTER_TYPE),
             cv.Optional(CONF_USE_WRITE_MULTIPLE, default=False): cv.boolean,
             cv.Optional(CONF_WRITE_LAMBDA): cv.returning_lambda,

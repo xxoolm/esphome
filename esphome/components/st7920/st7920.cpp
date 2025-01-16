@@ -1,7 +1,7 @@
 #include "st7920.h"
-#include "esphome/core/log.h"
-#include "esphome/core/application.h"
 #include "esphome/components/display/display_buffer.h"
+#include "esphome/core/application.h"
+#include "esphome/core/log.h"
 
 namespace esphome {
 namespace st7920 {
@@ -74,7 +74,7 @@ void ST7920::goto_xy_(uint16_t x, uint16_t y) {
 
 void HOT ST7920::write_display_data() {
   uint8_t i, j, b;
-  for (j = 0; j < (uint8_t)(this->get_height_internal() / 2); j++) {
+  for (j = 0; j < (uint8_t) (this->get_height_internal() / 2); j++) {
     this->goto_xy_(0, j);
     this->enable();
     for (i = 0; i < 16; i++) {  // 16 bytes from line #0+
@@ -118,7 +118,6 @@ size_t ST7920::get_buffer_length_() {
 
 void HOT ST7920::draw_absolute_pixel_internal(int x, int y, Color color) {
   if (x >= this->get_width_internal() || x < 0 || y >= this->get_height_internal() || y < 0) {
-    ESP_LOGW(TAG, "Position out of area: %dx%d", x, y);
     return;
   }
   int width = this->get_width_internal() / 8u;

@@ -1,56 +1,81 @@
 from dataclasses import dataclass
-from typing import Union
-from pathlib import Path
 import logging
 import os
+from pathlib import Path
+from typing import Optional, Union
 
-from esphome.helpers import copy_file_if_changed, write_file_if_changed
+from esphome import git
+import esphome.codegen as cg
+import esphome.config_validation as cv
 from esphome.const import (
+    CONF_ADVANCED,
     CONF_BOARD,
+    CONF_COMPONENTS,
+    CONF_ESPHOME,
     CONF_FRAMEWORK,
+    CONF_IGNORE_EFUSE_CUSTOM_MAC,
+    CONF_IGNORE_EFUSE_MAC_CRC,
+    CONF_NAME,
+    CONF_PATH,
+    CONF_PLATFORM_VERSION,
+    CONF_PLATFORMIO_OPTIONS,
+    CONF_REF,
+    CONF_REFRESH,
     CONF_SOURCE,
     CONF_TYPE,
+    CONF_URL,
     CONF_VARIANT,
     CONF_VERSION,
-    CONF_ADVANCED,
-    CONF_IGNORE_EFUSE_MAC_CRC,
     KEY_CORE,
     KEY_FRAMEWORK_VERSION,
+    KEY_NAME,
     KEY_TARGET_FRAMEWORK,
     KEY_TARGET_PLATFORM,
+    PLATFORM_ESP32,
+    TYPE_GIT,
+    TYPE_LOCAL,
     __version__,
 )
-from esphome.core import CORE, HexInt
-import esphome.config_validation as cv
-import esphome.codegen as cg
+from esphome.core import CORE, HexInt, TimePeriod
+import esphome.final_validate as fv
+from esphome.helpers import copy_file_if_changed, mkdir_p, write_file_if_changed
 
+from .boards import BOARDS
 from .const import (  # noqa
     KEY_BOARD,
+    KEY_COMPONENTS,
     KEY_ESP32,
+    KEY_EXTRA_BUILD_FILES,
+    KEY_PATH,
+    KEY_REF,
+    KEY_REFRESH,
+    KEY_REPO,
     KEY_SDKCONFIG_OPTIONS,
+    KEY_SUBMODULES,
     KEY_VARIANT,
-    VARIANT_ESP32C3,
+    VARIANT_ESP32,
     VARIANT_FRIENDLY,
     VARIANTS,
 )
-from .boards import BOARD_TO_VARIANT
 
 # force import gpio to register pin schema
 from .gpio import esp32_pin_to_code  # noqa
-
 
 _LOGGER = logging.getLogger(__name__)
 CODEOWNERS = ["@esphome/core"]
 AUTO_LOAD = ["preferences"]
 
+CONF_RELEASE = "release"
+
 
 def set_core_data(config):
     CORE.data[KEY_ESP32] = {}
-    CORE.data[KEY_CORE][KEY_TARGET_PLATFORM] = "esp32"
+    CORE.data[KEY_CORE][KEY_TARGET_PLATFORM] = PLATFORM_ESP32
     conf = config[CONF_FRAMEWORK]
     if conf[CONF_TYPE] == FRAMEWORK_ESP_IDF:
         CORE.data[KEY_CORE][KEY_TARGET_FRAMEWORK] = "esp-idf"
         CORE.data[KEY_ESP32][KEY_SDKCONFIG_OPTIONS] = {}
+        CORE.data[KEY_ESP32][KEY_COMPONENTS] = {}
     elif conf[CONF_TYPE] == FRAMEWORK_ARDUINO:
         CORE.data[KEY_CORE][KEY_TARGET_FRAMEWORK] = "arduino"
     CORE.data[KEY_CORE][KEY_FRAMEWORK_VERSION] = cv.Version.parse(
@@ -58,11 +83,34 @@ def set_core_data(config):
     )
     CORE.data[KEY_ESP32][KEY_BOARD] = config[CONF_BOARD]
     CORE.data[KEY_ESP32][KEY_VARIANT] = config[CONF_VARIANT]
+    CORE.data[KEY_ESP32][KEY_EXTRA_BUILD_FILES] = {}
+
     return config
 
 
 def get_esp32_variant(core_obj=None):
     return (core_obj or CORE).data[KEY_ESP32][KEY_VARIANT]
+
+
+def get_board(core_obj=None):
+    return (core_obj or CORE).data[KEY_ESP32][KEY_BOARD]
+
+
+def get_download_types(storage_json):
+    return [
+        {
+            "title": "Factory format (Previously Modern)",
+            "description": "For use with ESPHome Web and other tools.",
+            "file": "firmware.factory.bin",
+            "download": f"{storage_json.name}.factory.bin",
+        },
+        {
+            "title": "OTA format (Previously Legacy)",
+            "description": "For OTA updating a device.",
+            "file": "firmware.ota.bin",
+            "download": f"{storage_json.name}.ota.bin",
+        },
+    ]
 
 
 def only_on_variant(*, supported=None, unsupported=None):
@@ -104,6 +152,63 @@ def add_idf_sdkconfig_option(name: str, value: SdkconfigValueType):
     CORE.data[KEY_ESP32][KEY_SDKCONFIG_OPTIONS][name] = value
 
 
+def add_idf_component(
+    *,
+    name: str,
+    repo: str,
+    ref: str = None,
+    path: str = None,
+    refresh: TimePeriod = None,
+    components: Optional[list[str]] = None,
+    submodules: Optional[list[str]] = None,
+):
+    """Add an esp-idf component to the project."""
+    if not CORE.using_esp_idf:
+        raise ValueError("Not an esp-idf project")
+    if components is None:
+        components = []
+    if name not in CORE.data[KEY_ESP32][KEY_COMPONENTS]:
+        CORE.data[KEY_ESP32][KEY_COMPONENTS][name] = {
+            KEY_REPO: repo,
+            KEY_REF: ref,
+            KEY_PATH: path,
+            KEY_REFRESH: refresh,
+            KEY_COMPONENTS: components,
+            KEY_SUBMODULES: submodules,
+        }
+    else:
+        component_config = CORE.data[KEY_ESP32][KEY_COMPONENTS][name]
+        if components is not None:
+            component_config[KEY_COMPONENTS] = list(
+                set(component_config[KEY_COMPONENTS] + components)
+            )
+        if submodules is not None:
+            if component_config[KEY_SUBMODULES] is None:
+                component_config[KEY_SUBMODULES] = submodules
+            else:
+                component_config[KEY_SUBMODULES] = list(
+                    set(component_config[KEY_SUBMODULES] + submodules)
+                )
+
+
+def add_extra_script(stage: str, filename: str, path: str):
+    """Add an extra script to the project."""
+    key = f"{stage}:{filename}"
+    if add_extra_build_file(filename, path):
+        cg.add_platformio_option("extra_scripts", [key])
+
+
+def add_extra_build_file(filename: str, path: str) -> bool:
+    """Add an extra build file to the project."""
+    if filename not in CORE.data[KEY_ESP32][KEY_EXTRA_BUILD_FILES]:
+        CORE.data[KEY_ESP32][KEY_EXTRA_BUILD_FILES][filename] = {
+            KEY_NAME: filename,
+            KEY_PATH: path,
+        }
+        return True
+    return False
+
+
 def _format_framework_arduino_version(ver: cv.Version) -> str:
     # format the given arduino (https://github.com/espressif/arduino-esp32/releases) version to
     # a PIO platformio/framework-arduinoespressif32 value
@@ -113,11 +218,17 @@ def _format_framework_arduino_version(ver: cv.Version) -> str:
     return f"~3.{ver.major}{ver.minor:02d}{ver.patch:02d}.0"
 
 
-def _format_framework_espidf_version(ver: cv.Version) -> str:
+def _format_framework_espidf_version(
+    ver: cv.Version, release: str, for_platformio: bool
+) -> str:
     # format the given arduino (https://github.com/espressif/esp-idf/releases) version to
     # a PIO platformio/framework-espidf value
     # List of package versions: https://api.registry.platformio.org/v3/packages/platformio/tool/framework-espidf
-    return f"~3.{ver.major}{ver.minor:02d}{ver.patch:02d}.0"
+    if for_platformio:
+        return f"platformio/framework-espidf@~3.{ver.major}{ver.minor:02d}{ver.patch:02d}.0"
+    if release:
+        return f"pioarduino/framework-espidf@https://github.com/pioarduino/esp-idf/releases/download/v{str(ver)}.{release}/esp-idf-v{str(ver)}.zip"
+    return f"pioarduino/framework-espidf@https://github.com/pioarduino/esp-idf/releases/download/v{str(ver)}/esp-idf-v{str(ver)}.zip"
 
 
 # NOTE: Keep this in mind when updating the recommended version:
@@ -129,27 +240,49 @@ def _format_framework_espidf_version(ver: cv.Version) -> str:
 # The default/recommended arduino framework version
 #  - https://github.com/espressif/arduino-esp32/releases
 #  - https://api.registry.platformio.org/v3/packages/platformio/tool/framework-arduinoespressif32
-RECOMMENDED_ARDUINO_FRAMEWORK_VERSION = cv.Version(1, 0, 6)
+RECOMMENDED_ARDUINO_FRAMEWORK_VERSION = cv.Version(2, 0, 5)
 # The platformio/espressif32 version to use for arduino frameworks
 #  - https://github.com/platformio/platform-espressif32/releases
 #  - https://api.registry.platformio.org/v3/packages/platformio/platform/espressif32
-ARDUINO_PLATFORM_VERSION = cv.Version(3, 5, 0)
+ARDUINO_PLATFORM_VERSION = cv.Version(5, 4, 0)
 
 # The default/recommended esp-idf framework version
 #  - https://github.com/espressif/esp-idf/releases
 #  - https://api.registry.platformio.org/v3/packages/platformio/tool/framework-espidf
-RECOMMENDED_ESP_IDF_FRAMEWORK_VERSION = cv.Version(4, 3, 2)
+RECOMMENDED_ESP_IDF_FRAMEWORK_VERSION = cv.Version(5, 1, 5)
 # The platformio/espressif32 version to use for esp-idf frameworks
 #  - https://github.com/platformio/platform-espressif32/releases
 #  - https://api.registry.platformio.org/v3/packages/platformio/platform/espressif32
-ESP_IDF_PLATFORM_VERSION = cv.Version(3, 5, 0)
+ESP_IDF_PLATFORM_VERSION = cv.Version(51, 3, 7)
+
+# List based on https://registry.platformio.org/tools/platformio/framework-espidf/versions
+SUPPORTED_PLATFORMIO_ESP_IDF_5X = [
+    cv.Version(5, 3, 1),
+    cv.Version(5, 3, 0),
+    cv.Version(5, 2, 2),
+    cv.Version(5, 2, 1),
+    cv.Version(5, 1, 2),
+    cv.Version(5, 1, 1),
+    cv.Version(5, 1, 0),
+    cv.Version(5, 0, 2),
+    cv.Version(5, 0, 1),
+    cv.Version(5, 0, 0),
+]
+
+# pioarduino versions that don't require a release number
+# List based on https://github.com/pioarduino/esp-idf/releases
+SUPPORTED_PIOARDUINO_ESP_IDF_5X = [
+    cv.Version(5, 3, 1),
+    cv.Version(5, 3, 0),
+    cv.Version(5, 1, 5),
+]
 
 
 def _arduino_check_versions(value):
     value = value.copy()
     lookups = {
-        "dev": (cv.Version(2, 0, 0), "https://github.com/espressif/arduino-esp32.git"),
-        "latest": (cv.Version(1, 0, 6), None),
+        "dev": (cv.Version(2, 1, 0), "https://github.com/espressif/arduino-esp32.git"),
+        "latest": (cv.Version(2, 0, 9), None),
         "recommended": (RECOMMENDED_ARDUINO_FRAMEWORK_VERSION, None),
     }
 
@@ -183,8 +316,8 @@ def _arduino_check_versions(value):
 def _esp_idf_check_versions(value):
     value = value.copy()
     lookups = {
-        "dev": (cv.Version(5, 0, 0), "https://github.com/espressif/esp-idf.git"),
-        "latest": (cv.Version(4, 3, 2), None),
+        "dev": (cv.Version(5, 1, 5), "https://github.com/espressif/esp-idf.git"),
+        "latest": (cv.Version(5, 1, 5), None),
         "recommended": (RECOMMENDED_ESP_IDF_FRAMEWORK_VERSION, None),
     }
 
@@ -202,12 +335,50 @@ def _esp_idf_check_versions(value):
     if version < cv.Version(4, 0, 0):
         raise cv.Invalid("Only ESP-IDF 4.0+ is supported.")
 
-    value[CONF_VERSION] = str(version)
-    value[CONF_SOURCE] = source or _format_framework_espidf_version(version)
+    # flag this for later *before* we set value[CONF_PLATFORM_VERSION] below
+    has_platform_ver = CONF_PLATFORM_VERSION in value
 
     value[CONF_PLATFORM_VERSION] = value.get(
         CONF_PLATFORM_VERSION, _parse_platform_version(str(ESP_IDF_PLATFORM_VERSION))
     )
+
+    if (
+        (is_platformio := _platform_is_platformio(value[CONF_PLATFORM_VERSION]))
+        and version.major >= 5
+        and version not in SUPPORTED_PLATFORMIO_ESP_IDF_5X
+    ):
+        raise cv.Invalid(
+            f"ESP-IDF {str(version)} not supported by platformio/espressif32"
+        )
+
+    if (
+        version.major < 5
+        or (
+            version in SUPPORTED_PLATFORMIO_ESP_IDF_5X
+            and version not in SUPPORTED_PIOARDUINO_ESP_IDF_5X
+        )
+    ) and not has_platform_ver:
+        raise cv.Invalid(
+            f"ESP-IDF {value[CONF_VERSION]} may be supported by platformio/espressif32; please specify '{CONF_PLATFORM_VERSION}'"
+        )
+
+    if (
+        not is_platformio
+        and CONF_RELEASE not in value
+        and version not in SUPPORTED_PIOARDUINO_ESP_IDF_5X
+    ):
+        raise cv.Invalid(
+            f"ESP-IDF {value[CONF_VERSION]} is not available with pioarduino; you may need to specify '{CONF_RELEASE}'"
+        )
+
+    value[CONF_VERSION] = str(version)
+    value[CONF_SOURCE] = source or _format_framework_espidf_version(
+        version, value.get(CONF_RELEASE, None), is_platformio
+    )
+
+    if value[CONF_SOURCE].startswith("http"):
+        # prefix is necessary or platformio will complain with a cryptic error
+        value[CONF_SOURCE] = f"framework-espidf@{value[CONF_SOURCE]}"
 
     if version != RECOMMENDED_ESP_IDF_FRAMEWORK_VERSION:
         _LOGGER.warning(
@@ -220,29 +391,81 @@ def _esp_idf_check_versions(value):
 
 def _parse_platform_version(value):
     try:
+        ver = cv.Version.parse(cv.version_number(value))
+        if ver.major >= 50:  # a pioarduino version
+            if "-" in value:
+                # maybe a release candidate?...definitely not our default, just use it as-is...
+                return f"https://github.com/pioarduino/platform-espressif32.git#{value}"
+            return f"https://github.com/pioarduino/platform-espressif32.git#{ver.major}.{ver.minor:02d}.{ver.patch:02d}"
         # if platform version is a valid version constraint, prefix the default package
         cv.platformio_version_constraint(value)
-        return f"platformio/espressif32 @ {value}"
+        return f"platformio/espressif32@{value}"
     except cv.Invalid:
         return value
 
 
+def _platform_is_platformio(value):
+    try:
+        ver = cv.Version.parse(cv.version_number(value))
+        return ver.major < 50
+    except cv.Invalid:
+        return "platformio" in value
+
+
 def _detect_variant(value):
-    if CONF_VARIANT not in value:
-        board = value[CONF_BOARD]
-        if board not in BOARD_TO_VARIANT:
+    board = value[CONF_BOARD]
+    if board in BOARDS:
+        variant = BOARDS[board][KEY_VARIANT]
+        if CONF_VARIANT in value and variant != value[CONF_VARIANT]:
             raise cv.Invalid(
-                "This board is unknown, please set the variant manually",
+                f"Option '{CONF_VARIANT}' does not match selected board.",
+                path=[CONF_VARIANT],
+            )
+        value = value.copy()
+        value[CONF_VARIANT] = variant
+    else:
+        if CONF_VARIANT not in value:
+            raise cv.Invalid(
+                "This board is unknown, if you are sure you want to compile with this board selection, "
+                f"override with option '{CONF_VARIANT}'",
                 path=[CONF_BOARD],
             )
-
-        value = value.copy()
-        value[CONF_VARIANT] = BOARD_TO_VARIANT[board]
-
+        _LOGGER.warning(
+            "This board is unknown. Make sure the chosen chip component is correct.",
+        )
     return value
 
 
-CONF_PLATFORM_VERSION = "platform_version"
+def final_validate(config):
+    if not (
+        pio_options := fv.full_config.get()[CONF_ESPHOME].get(CONF_PLATFORMIO_OPTIONS)
+    ):
+        # Not specified or empty
+        return config
+
+    pio_flash_size_key = "board_upload.flash_size"
+    pio_partitions_key = "board_build.partitions"
+    if CONF_PARTITIONS in config and pio_partitions_key in pio_options:
+        raise cv.Invalid(
+            f"Do not specify '{pio_partitions_key}' in '{CONF_PLATFORMIO_OPTIONS}' with '{CONF_PARTITIONS}' in esp32"
+        )
+
+    if pio_flash_size_key in pio_options:
+        raise cv.Invalid(
+            f"Please specify {CONF_FLASH_SIZE} within esp32 configuration only"
+        )
+
+    if (
+        config[CONF_VARIANT] != VARIANT_ESP32
+        and CONF_ADVANCED in (conf_fw := config[CONF_FRAMEWORK])
+        and CONF_IGNORE_EFUSE_MAC_CRC in conf_fw[CONF_ADVANCED]
+    ):
+        raise cv.Invalid(
+            f"{CONF_IGNORE_EFUSE_MAC_CRC} is not supported on {config[CONF_VARIANT]}"
+        )
+
+    return config
+
 
 ARDUINO_FRAMEWORK_SCHEMA = cv.All(
     cv.Schema(
@@ -250,6 +473,13 @@ ARDUINO_FRAMEWORK_SCHEMA = cv.All(
             cv.Optional(CONF_VERSION, default="recommended"): cv.string_strict,
             cv.Optional(CONF_SOURCE): cv.string_strict,
             cv.Optional(CONF_PLATFORM_VERSION): _parse_platform_version,
+            cv.Optional(CONF_ADVANCED, default={}): cv.Schema(
+                {
+                    cv.Optional(
+                        CONF_IGNORE_EFUSE_CUSTOM_MAC, default=False
+                    ): cv.boolean,
+                }
+            ),
         }
     ),
     _arduino_check_versions,
@@ -260,6 +490,7 @@ ESP_IDF_FRAMEWORK_SCHEMA = cv.All(
     cv.Schema(
         {
             cv.Optional(CONF_VERSION, default="recommended"): cv.string_strict,
+            cv.Optional(CONF_RELEASE): cv.string_strict,
             cv.Optional(CONF_SOURCE): cv.string_strict,
             cv.Optional(CONF_PLATFORM_VERSION): _parse_platform_version,
             cv.Optional(CONF_SDKCONFIG_OPTIONS, default={}): {
@@ -267,8 +498,23 @@ ESP_IDF_FRAMEWORK_SCHEMA = cv.All(
             },
             cv.Optional(CONF_ADVANCED, default={}): cv.Schema(
                 {
-                    cv.Optional(CONF_IGNORE_EFUSE_MAC_CRC, default=False): cv.boolean,
+                    cv.Optional(
+                        CONF_IGNORE_EFUSE_CUSTOM_MAC, default=False
+                    ): cv.boolean,
+                    cv.Optional(CONF_IGNORE_EFUSE_MAC_CRC): cv.boolean,
                 }
+            ),
+            cv.Optional(CONF_COMPONENTS, default=[]): cv.ensure_list(
+                cv.Schema(
+                    {
+                        cv.Required(CONF_NAME): cv.string_strict,
+                        cv.Required(CONF_SOURCE): cv.SOURCE_SCHEMA,
+                        cv.Optional(CONF_PATH): cv.string,
+                        cv.Optional(CONF_REFRESH, default="1d"): cv.All(
+                            cv.string, cv.source_refresh
+                        ),
+                    }
+                )
             ),
         }
     ),
@@ -289,10 +535,24 @@ FRAMEWORK_SCHEMA = cv.typed_schema(
 )
 
 
+FLASH_SIZES = [
+    "2MB",
+    "4MB",
+    "8MB",
+    "16MB",
+    "32MB",
+]
+
+CONF_FLASH_SIZE = "flash_size"
+CONF_PARTITIONS = "partitions"
 CONFIG_SCHEMA = cv.All(
     cv.Schema(
         {
             cv.Required(CONF_BOARD): cv.string_strict,
+            cv.Optional(CONF_FLASH_SIZE, default="4MB"): cv.one_of(
+                *FLASH_SIZES, upper=True
+            ),
+            cv.Optional(CONF_PARTITIONS): cv.file_,
             cv.Optional(CONF_VARIANT): cv.one_of(*VARIANTS, upper=True),
             cv.Optional(CONF_FRAMEWORK, default={}): FRAMEWORK_SCHEMA,
         }
@@ -302,8 +562,12 @@ CONFIG_SCHEMA = cv.All(
 )
 
 
+FINAL_VALIDATE_SCHEMA = cv.Schema(final_validate)
+
+
 async def to_code(config):
     cg.add_platformio_option("board", config[CONF_BOARD])
+    cg.add_platformio_option("board_upload.flash_size", config[CONF_FLASH_SIZE])
     cg.add_build_flag("-DUSE_ESP32")
     cg.add_define("ESPHOME_BOARD", config[CONF_BOARD])
     cg.add_build_flag(f"-DUSE_ESP32_VARIANT_{config[CONF_VARIANT]}")
@@ -316,16 +580,30 @@ async def to_code(config):
     conf = config[CONF_FRAMEWORK]
     cg.add_platformio_option("platform", conf[CONF_PLATFORM_VERSION])
 
-    cg.add_platformio_option("extra_scripts", ["post:post_build.py"])
+    if CONF_ADVANCED in conf and conf[CONF_ADVANCED][CONF_IGNORE_EFUSE_CUSTOM_MAC]:
+        cg.add_define("USE_ESP32_IGNORE_EFUSE_CUSTOM_MAC")
+
+    add_extra_script(
+        "post",
+        "post_build.py",
+        os.path.join(os.path.dirname(__file__), "post_build.py.script"),
+    )
 
     if conf[CONF_TYPE] == FRAMEWORK_ESP_IDF:
         cg.add_platformio_option("framework", "espidf")
         cg.add_build_flag("-DUSE_ESP_IDF")
         cg.add_build_flag("-DUSE_ESP32_FRAMEWORK_ESP_IDF")
         cg.add_build_flag("-Wno-nonnull-compare")
+
+        cg.add_platformio_option("platform_packages", [conf[CONF_SOURCE]])
+
+        # platformio/toolchain-esp32ulp does not support linux_aarch64 yet and has not been updated for over 2 years
+        # This is espressif's own published version which is more up to date.
         cg.add_platformio_option(
-            "platform_packages",
-            [f"platformio/framework-espidf @ {conf[CONF_SOURCE]}"],
+            "platform_packages", ["espressif/toolchain-esp32ulp@2.35.0-20220830"]
+        )
+        add_idf_sdkconfig_option(
+            f"CONFIG_ESPTOOLPY_FLASHSIZE_{config[CONF_FLASH_SIZE]}", True
         )
         add_idf_sdkconfig_option("CONFIG_PARTITION_TABLE_SINGLE_APP", False)
         add_idf_sdkconfig_option("CONFIG_PARTITION_TABLE_CUSTOM", True)
@@ -345,15 +623,24 @@ async def to_code(config):
         add_idf_sdkconfig_option("CONFIG_ESP_TASK_WDT_CHECK_IDLE_TASK_CPU1", False)
 
         cg.add_platformio_option("board_build.partitions", "partitions.csv")
+        if CONF_PARTITIONS in config:
+            add_extra_build_file(
+                "partitions.csv", CORE.relative_config_path(config[CONF_PARTITIONS])
+            )
 
         for name, value in conf[CONF_SDKCONFIG_OPTIONS].items():
             add_idf_sdkconfig_option(name, RawSdkconfigValue(value))
 
-        if conf[CONF_ADVANCED][CONF_IGNORE_EFUSE_MAC_CRC]:
-            cg.add_define("USE_ESP32_IGNORE_EFUSE_MAC_CRC")
-            add_idf_sdkconfig_option(
-                "CONFIG_ESP32_PHY_CALIBRATION_AND_DATA_STORAGE", False
-            )
+        if conf[CONF_ADVANCED].get(CONF_IGNORE_EFUSE_MAC_CRC):
+            add_idf_sdkconfig_option("CONFIG_ESP_MAC_IGNORE_MAC_CRC_ERROR", True)
+            if (framework_ver.major, framework_ver.minor) >= (4, 4):
+                add_idf_sdkconfig_option(
+                    "CONFIG_ESP_PHY_CALIBRATION_AND_DATA_STORAGE", False
+                )
+            else:
+                add_idf_sdkconfig_option(
+                    "CONFIG_ESP32_PHY_CALIBRATION_AND_DATA_STORAGE", False
+                )
 
         cg.add_define(
             "USE_ESP_IDF_VERSION_CODE",
@@ -362,16 +649,32 @@ async def to_code(config):
             ),
         )
 
+        for component in conf[CONF_COMPONENTS]:
+            source = component[CONF_SOURCE]
+            if source[CONF_TYPE] == TYPE_GIT:
+                add_idf_component(
+                    name=component[CONF_NAME],
+                    repo=source[CONF_URL],
+                    ref=source.get(CONF_REF),
+                    path=component.get(CONF_PATH),
+                    refresh=component[CONF_REFRESH],
+                )
+            elif source[CONF_TYPE] == TYPE_LOCAL:
+                _LOGGER.warning("Local components are not implemented yet.")
+
     elif conf[CONF_TYPE] == FRAMEWORK_ARDUINO:
         cg.add_platformio_option("framework", "arduino")
         cg.add_build_flag("-DUSE_ARDUINO")
         cg.add_build_flag("-DUSE_ESP32_FRAMEWORK_ARDUINO")
         cg.add_platformio_option(
             "platform_packages",
-            [f"platformio/framework-arduinoespressif32 @ {conf[CONF_SOURCE]}"],
+            [f"platformio/framework-arduinoespressif32@{conf[CONF_SOURCE]}"],
         )
 
-        cg.add_platformio_option("board_build.partitions", "partitions.csv")
+        if CONF_PARTITIONS in config:
+            cg.add_platformio_option("board_build.partitions", config[CONF_PARTITIONS])
+        else:
+            cg.add_platformio_option("board_build.partitions", "partitions.csv")
 
         cg.add_define(
             "USE_ARDUINO_VERSION_CODE",
@@ -381,24 +684,47 @@ async def to_code(config):
         )
 
 
-ARDUINO_PARTITIONS_CSV = """\
-nvs,      data, nvs,     0x009000, 0x005000,
-otadata,  data, ota,     0x00e000, 0x002000,
-app0,     app,  ota_0,   0x010000, 0x1C0000,
-app1,     app,  ota_1,   0x1D0000, 0x1C0000,
-eeprom,   data, 0x99,    0x390000, 0x001000,
-spiffs,   data, spiffs,  0x391000, 0x00F000
+APP_PARTITION_SIZES = {
+    "2MB": 0x0C0000,  # 768 KB
+    "4MB": 0x1C0000,  # 1792 KB
+    "8MB": 0x3C0000,  # 3840 KB
+    "16MB": 0x7C0000,  # 7936 KB
+    "32MB": 0xFC0000,  # 16128 KB
+}
+
+
+def get_arduino_partition_csv(flash_size):
+    app_partition_size = APP_PARTITION_SIZES[flash_size]
+    eeprom_partition_size = 0x1000  # 4 KB
+    spiffs_partition_size = 0xF000  # 60 KB
+
+    app0_partition_start = 0x010000  # 64 KB
+    app1_partition_start = app0_partition_start + app_partition_size
+    eeprom_partition_start = app1_partition_start + app_partition_size
+    spiffs_partition_start = eeprom_partition_start + eeprom_partition_size
+
+    partition_csv = f"""\
+nvs,      data, nvs,     0x9000, 0x5000,
+otadata,  data, ota,     0xE000, 0x2000,
+app0,     app,  ota_0,   0x{app0_partition_start:X}, 0x{app_partition_size:X},
+app1,     app,  ota_1,   0x{app1_partition_start:X}, 0x{app_partition_size:X},
+eeprom,   data, 0x99,    0x{eeprom_partition_start:X}, 0x{eeprom_partition_size:X},
+spiffs,   data, spiffs,  0x{spiffs_partition_start:X}, 0x{spiffs_partition_size:X}
 """
+    return partition_csv
 
 
-IDF_PARTITIONS_CSV = """\
-# Name,   Type, SubType, Offset,   Size, Flags
-nvs,      data, nvs,     ,        0x4000,
+def get_idf_partition_csv(flash_size):
+    app_partition_size = APP_PARTITION_SIZES[flash_size]
+
+    partition_csv = f"""\
 otadata,  data, ota,     ,        0x2000,
 phy_init, data, phy,     ,        0x1000,
-app0,     app,  ota_0,   ,      0x1C0000,
-app1,     app,  ota_1,   ,      0x1C0000,
+app0,     app,  ota_0,   ,        0x{app_partition_size:X},
+app1,     app,  ota_1,   ,        0x{app_partition_size:X},
+nvs,      data, nvs,     ,        0x6D000,
 """
+    return partition_csv
 
 
 def _format_sdkconfig_val(value: SdkconfigValueType) -> str:
@@ -439,16 +765,22 @@ def _write_sdkconfig():
 # Called by writer.py
 def copy_files():
     if CORE.using_arduino:
-        write_file_if_changed(
-            CORE.relative_build_path("partitions.csv"),
-            ARDUINO_PARTITIONS_CSV,
-        )
+        if "partitions.csv" not in CORE.data[KEY_ESP32][KEY_EXTRA_BUILD_FILES]:
+            write_file_if_changed(
+                CORE.relative_build_path("partitions.csv"),
+                get_arduino_partition_csv(
+                    CORE.platformio_options.get("board_upload.flash_size")
+                ),
+            )
     if CORE.using_esp_idf:
         _write_sdkconfig()
-        write_file_if_changed(
-            CORE.relative_build_path("partitions.csv"),
-            IDF_PARTITIONS_CSV,
-        )
+        if "partitions.csv" not in CORE.data[KEY_ESP32][KEY_EXTRA_BUILD_FILES]:
+            write_file_if_changed(
+                CORE.relative_build_path("partitions.csv"),
+                get_idf_partition_csv(
+                    CORE.platformio_options.get("board_upload.flash_size")
+                ),
+            )
         # IDF build scripts look for version string to put in the build.
         # However, if the build path does not have an initialized git repo,
         # and no version.txt file exists, the CMake script fails for some setups.
@@ -458,9 +790,64 @@ def copy_files():
             __version__,
         )
 
-    dir = os.path.dirname(__file__)
-    post_build_file = os.path.join(dir, "post_build.py.script")
-    copy_file_if_changed(
-        post_build_file,
-        CORE.relative_build_path("post_build.py"),
-    )
+        import shutil
+
+        shutil.rmtree(CORE.relative_build_path("components"), ignore_errors=True)
+
+        if CORE.data[KEY_ESP32][KEY_COMPONENTS]:
+            components: dict = CORE.data[KEY_ESP32][KEY_COMPONENTS]
+
+            for name, component in components.items():
+                repo_dir, _ = git.clone_or_update(
+                    url=component[KEY_REPO],
+                    ref=component[KEY_REF],
+                    refresh=component[KEY_REFRESH],
+                    domain="idf_components",
+                    submodules=component[KEY_SUBMODULES],
+                )
+                mkdir_p(CORE.relative_build_path("components"))
+                component_dir = repo_dir
+                if component[KEY_PATH] is not None:
+                    component_dir = component_dir / component[KEY_PATH]
+
+                if component[KEY_COMPONENTS] == ["*"]:
+                    shutil.copytree(
+                        component_dir,
+                        CORE.relative_build_path("components"),
+                        dirs_exist_ok=True,
+                        ignore=shutil.ignore_patterns(".git*"),
+                        symlinks=True,
+                        ignore_dangling_symlinks=True,
+                    )
+                elif len(component[KEY_COMPONENTS]) > 0:
+                    for comp in component[KEY_COMPONENTS]:
+                        shutil.copytree(
+                            component_dir / comp,
+                            CORE.relative_build_path(f"components/{comp}"),
+                            dirs_exist_ok=True,
+                            ignore=shutil.ignore_patterns(".git*"),
+                            symlinks=True,
+                            ignore_dangling_symlinks=True,
+                        )
+                else:
+                    shutil.copytree(
+                        component_dir,
+                        CORE.relative_build_path(f"components/{name}"),
+                        dirs_exist_ok=True,
+                        ignore=shutil.ignore_patterns(".git*"),
+                        symlinks=True,
+                        ignore_dangling_symlinks=True,
+                    )
+
+    for _, file in CORE.data[KEY_ESP32][KEY_EXTRA_BUILD_FILES].items():
+        if file[KEY_PATH].startswith("http"):
+            import requests
+
+            mkdir_p(CORE.relative_build_path(os.path.dirname(file[KEY_NAME])))
+            with open(CORE.relative_build_path(file[KEY_NAME]), "wb") as f:
+                f.write(requests.get(file[KEY_PATH], timeout=30).content)
+        else:
+            copy_file_if_changed(
+                file[KEY_PATH],
+                CORE.relative_build_path(file[KEY_NAME]),
+            )

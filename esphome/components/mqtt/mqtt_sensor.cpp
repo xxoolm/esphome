@@ -1,3 +1,4 @@
+#include <cinttypes>
 #include "mqtt_sensor.h"
 #include "esphome/core/log.h"
 
@@ -26,7 +27,7 @@ void MQTTSensorComponent::setup() {
 void MQTTSensorComponent::dump_config() {
   ESP_LOGCONFIG(TAG, "MQTT Sensor '%s':", this->sensor_->get_name().c_str());
   if (this->get_expire_after() > 0) {
-    ESP_LOGCONFIG(TAG, "  Expire After: %us", this->get_expire_after() / 1000);
+    ESP_LOGCONFIG(TAG, "  Expire After: %" PRIu32 "s", this->get_expire_after() / 1000);
   }
   LOG_MQTT_COMPONENT(true, false)
 }
@@ -68,6 +69,8 @@ bool MQTTSensorComponent::send_initial_state() {
   }
 }
 bool MQTTSensorComponent::publish_state(float value) {
+  if (mqtt::global_mqtt_client->is_publish_nan_as_none() && std::isnan(value))
+    return this->publish(this->get_state_topic_(), "None");
   int8_t accuracy = this->sensor_->get_accuracy_decimals();
   return this->publish(this->get_state_topic_(), value_accuracy_to_string(value, accuracy));
 }

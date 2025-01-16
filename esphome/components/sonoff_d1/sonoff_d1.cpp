@@ -71,8 +71,9 @@ void SonoffD1Output::skip_command_() {
   }
 
   // Warn about unexpected bytes in the protocol with UART dimmer
-  if (garbage)
+  if (garbage) {
     ESP_LOGW(TAG, "[%04d] Skip %d bytes from the dimmer", this->write_count_, garbage);
+  }
 }
 
 // This assumes some data is already available
@@ -127,7 +128,8 @@ bool SonoffD1Output::read_ack_(const uint8_t *cmd, const size_t len) {
   // Expected acknowledgement from rf chip
   uint8_t ref_buffer[7] = {0xAA, 0x55, cmd[2], cmd[3], 0x00, 0x00, 0x00};
   uint8_t buffer[sizeof(ref_buffer)] = {0};
-  uint32_t pos = 0, buf_len = sizeof(ref_buffer);
+  uint32_t pos = 0;
+  size_t buf_len = sizeof(ref_buffer);
 
   // Update the reference checksum
   this->populate_checksum_(ref_buffer, sizeof(ref_buffer));
@@ -161,7 +163,7 @@ bool SonoffD1Output::write_command_(uint8_t *cmd, const size_t len, bool needs_a
     return false;
   }
   if ((cmd[5] + 7 /*mandatory header + suffix length*/) != len) {
-    ESP_LOGW(TAG, "[%04d] Payload length field does not match packet lenght (%d, expected %d)", this->write_count_,
+    ESP_LOGW(TAG, "[%04d] Payload length field does not match packet length (%d, expected %d)", this->write_count_,
              cmd[5], len - 7);
     return false;
   }
