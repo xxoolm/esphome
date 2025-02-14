@@ -4,13 +4,15 @@
 #include "esphome/components/switch/switch.h"
 #include "esphome/core/component.h"
 
+#include <vector>
+
 namespace esphome {
 namespace modbus_controller {
 
 class ModbusSwitch : public Component, public switch_::Switch, public SensorItem {
  public:
   ModbusSwitch(ModbusRegisterType register_type, uint16_t start_address, uint8_t offset, uint32_t bitmask,
-               uint8_t skip_updates, bool force_new_range) {
+               uint16_t skip_updates, bool force_new_range) {
     this->register_type = register_type;
     this->start_address = start_address;
     this->offset = offset;
@@ -38,8 +40,8 @@ class ModbusSwitch : public Component, public switch_::Switch, public SensorItem
   void set_use_write_mutiple(bool use_write_multiple) { this->use_write_multiple_ = use_write_multiple; }
 
  protected:
-  ModbusController *parent_;
-  bool use_write_multiple_;
+  ModbusController *parent_{nullptr};
+  bool use_write_multiple_{false};
   optional<transform_func_t> publish_transform_func_{nullopt};
   optional<write_transform_func_t> write_transform_func_{nullopt};
 };

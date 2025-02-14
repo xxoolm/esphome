@@ -52,6 +52,8 @@ CONF_CELL_13_VOLTAGE = "cell_13_voltage"
 CONF_CELL_14_VOLTAGE = "cell_14_voltage"
 CONF_CELL_15_VOLTAGE = "cell_15_voltage"
 CONF_CELL_16_VOLTAGE = "cell_16_voltage"
+CONF_CELL_17_VOLTAGE = "cell_17_voltage"
+CONF_CELL_18_VOLTAGE = "cell_18_voltage"
 ICON_CURRENT_DC = "mdi:current-dc"
 ICON_BATTERY_OUTLINE = "mdi:battery-outline"
 ICON_THERMOMETER_CHEVRON_UP = "mdi:thermometer-chevron-up"
@@ -92,6 +94,8 @@ TYPES = [
     CONF_CELL_14_VOLTAGE,
     CONF_CELL_15_VOLTAGE,
     CONF_CELL_16_VOLTAGE,
+    CONF_CELL_17_VOLTAGE,
+    CONF_CELL_18_VOLTAGE,
 ]
 
 CELL_VOLTAGE_SCHEMA = sensor.sensor_schema(
@@ -212,15 +216,16 @@ CONFIG_SCHEMA = cv.All(
             cv.Optional(CONF_CELL_14_VOLTAGE): CELL_VOLTAGE_SCHEMA,
             cv.Optional(CONF_CELL_15_VOLTAGE): CELL_VOLTAGE_SCHEMA,
             cv.Optional(CONF_CELL_16_VOLTAGE): CELL_VOLTAGE_SCHEMA,
+            cv.Optional(CONF_CELL_17_VOLTAGE): CELL_VOLTAGE_SCHEMA,
+            cv.Optional(CONF_CELL_18_VOLTAGE): CELL_VOLTAGE_SCHEMA,
         }
     ).extend(cv.COMPONENT_SCHEMA)
 )
 
 
 async def setup_conf(config, key, hub):
-    if key in config:
-        conf = config[key]
-        sens = await sensor.new_sensor(conf)
+    if sensor_config := config.get(key):
+        sens = await sensor.new_sensor(sensor_config)
         cg.add(getattr(hub, f"set_{key}_sensor")(sens))
 
 

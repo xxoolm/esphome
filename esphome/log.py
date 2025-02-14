@@ -67,22 +67,22 @@ class ESPHomeLogFormatter(logging.Formatter):
 
 
 def setup_log(
-    debug: bool = False, quiet: bool = False, include_timestamp: bool = False
+    log_level=logging.INFO,
+    include_timestamp: bool = False,
 ) -> None:
     import colorama
 
-    if debug:
-        log_level = logging.DEBUG
+    colorama.init()
+
+    if log_level == logging.DEBUG:
         CORE.verbose = True
-    elif quiet:
-        log_level = logging.CRITICAL
-    else:
-        log_level = logging.INFO
+    elif log_level == logging.CRITICAL:
+        CORE.quiet = True
+
     logging.basicConfig(level=log_level)
 
     logging.getLogger("urllib3").setLevel(logging.WARNING)
 
-    colorama.init()
     logging.getLogger().handlers[0].setFormatter(
         ESPHomeLogFormatter(include_timestamp=include_timestamp)
     )

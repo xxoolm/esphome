@@ -1,27 +1,29 @@
+import importlib
 import logging
 import os
-import re
 from pathlib import Path
-from typing import Dict, List, Union
+import re
+from typing import Union
 
-from esphome.config import iter_components
+from esphome import loader
+from esphome.config import iter_component_configs, iter_components
 from esphome.const import (
+    ENV_NOGITIGNORE,
     HEADER_FILE_EXTENSIONS,
+    PLATFORM_ESP32,
     SOURCE_FILE_EXTENSIONS,
     __version__,
-    ENV_NOGITIGNORE,
 )
 from esphome.core import CORE, EsphomeError
 from esphome.helpers import (
-    mkdir_p,
-    read_file,
-    write_file_if_changed,
-    walk_files,
     copy_file_if_changed,
     get_bool_env,
+    mkdir_p,
+    read_file,
+    walk_files,
+    write_file_if_changed,
 )
 from esphome.storage_json import StorageJSON, storage_path
-from esphome import loader
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -70,14 +72,14 @@ UPLOAD_SPEED_OVERRIDE = {
 
 def get_flags(key):
     flags = set()
-    for _, component, conf in iter_components(CORE.config):
+    for _, component, conf in iter_component_configs(CORE.config):
         flags |= getattr(component, key)(conf)
     return flags
 
 
 def get_include_text():
     include_text = '#include "esphome.h"\nusing namespace esphome;\n'
-    for _, component, conf in iter_components(CORE.config):
+    for _, component, conf in iter_component_configs(CORE.config):
         if not hasattr(component, "includes"):
             continue
         includes = component.includes
@@ -98,7 +100,7 @@ def replace_file_content(text, pattern, repl):
     return content_new, count
 
 
-def storage_should_clean(old, new):  # type: (StorageJSON, StorageJSON) -> bool
+def storage_should_clean(old: StorageJSON, new: StorageJSON) -> bool:
     if old is None:
         return True
 
@@ -106,6 +108,11 @@ def storage_should_clean(old, new):  # type: (StorageJSON, StorageJSON) -> bool
         return True
     if old.build_path != new.build_path:
         return True
+    if old.loaded_integrations != new.loaded_integrations:
+        if new.core_platform == PLATFORM_ESP32:
+            from esphome.components.esp32 import FRAMEWORK_ESP_IDF
+
+            return new.framework == FRAMEWORK_ESP_IDF
     return False
 
 
@@ -117,13 +124,15 @@ def update_storage_json():
         return
 
     if storage_should_clean(old, new):
-        _LOGGER.info("Core config or version changed, cleaning build files...")
+        _LOGGER.info(
+            "Core config, version or integrations changed, cleaning build files..."
+        )
         clean_build()
 
     new.save(path)
 
 
-def format_ini(data: Dict[str, Union[str, List[str]]]) -> str:
+def format_ini(data: dict[str, Union[str, list[str]]]) -> str:
     content = ""
     for key, value in sorted(data.items()):
         if isinstance(value, list):
@@ -142,7 +151,10 @@ def get_ini_content():
     # Sort to avoid changing build flags order
     CORE.add_platformio_option("build_flags", sorted(CORE.build_flags))
 
-    content = f"[env:{CORE.name}]\n"
+    content = "[platformio]\n"
+    content += f"description = ESPHome {__version__}\n"
+
+    content += f"[env:{CORE.name}]\n"
     content += format_ini(CORE.platformio_options)
 
     return content
@@ -200,7 +212,9 @@ def write_platformio_project():
     write_platformio_ini(content)
 
 
-DEFINES_H_FORMAT = ESPHOME_H_FORMAT = """\
+DEFINES_H_FORMAT = (
+    ESPHOME_H_FORMAT
+) = """\
 #pragma once
 #include "esphome/core/macros.h"
 {}
@@ -226,8 +240,8 @@ the custom_components folder or the external_components feature.
 
 
 def copy_src_tree():
-    source_files: List[loader.FileResource] = []
-    for _, component, _ in iter_components(CORE.config):
+    source_files: list[loader.FileResource] = []
+    for _, component in iter_components(CORE.config):
         source_files += component.resources
     source_files_map = {
         Path(x.package.replace(".", "/") + "/" + x.resource): x for x in source_files
@@ -286,15 +300,13 @@ def copy_src_tree():
         CORE.relative_src_path("esphome", "core", "version.h"), generate_version_h()
     )
 
-    if CORE.is_esp32:
-        from esphome.components.esp32 import copy_files
-
+    platform = "esphome.components." + CORE.target_platform
+    try:
+        module = importlib.import_module(platform)
+        copy_files = getattr(module, "copy_files")
         copy_files()
-
-    elif CORE.is_esp8266:
-        from esphome.components.esp8266 import copy_files
-
-        copy_files()
+    except AttributeError:
+        pass
 
 
 def generate_defines_h():
